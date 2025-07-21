@@ -134,12 +134,21 @@ def detect_cross(df: pd.DataFrame) -> Optional[str]:
 # ───── 데이터 조회 ───── #
 
 def fetch_daily(code: str, days: int = 120) -> Optional[pd.DataFrame]:
-    end, start = dt.datetime.now(), dt.datetime.now() - dt.timedelta(days=days)
+    end = dt.datetime.now()
+    start = end - dt.timedelta(days=days)
+    # FinanceDataReader는 티커에 .KS/.KQ 접미사가 없으므로, 심볼만 추출
+    symbol = code.split('.')[0]
     try:
-        df = fdr.DataReader(code, start, end)
-        if df.empty: return None
-        df = df.reset_index(); df.rename(columns=str.capitalize, inplace=True)
+        df = fdr.DataReader(symbol, start, end)
+        if df.empty:
+            logging.warning(f"{code}: 데이터 없음")
+            return None
+        df = df.reset_index()
+        df.rename(columns=str.capitalize, inplace=True)
         return df[['Date','Open','High','Low','Close','Volume']]
+    except Exception as e:
+        logging.warning(f"{code}: 데이터 조회 실패 - {e}")
+        return None
     except:
         logging.warning(f"{code}: 데이터 조회 실패")
         return None

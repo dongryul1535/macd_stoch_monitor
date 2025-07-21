@@ -104,29 +104,41 @@ def get_name(code: str) -> str:
 
 # ───── 전분기 EPS 조회 (DART API) ───── #
 def get_last_quarter_eps(corp_code: str) -> Optional[float]:
+    """전 분기 EPS 조회: 사업보고서/분기보고서 순으로 시도"""
     now = dt.datetime.now()
+    # 분기 코드 순서: 4Q(Annual), Q1, Q2, Q3
+    reprt_codes = []
     q = (now.month - 1) // 3
     if q == 0:
-        year, rep = now.year - 1, '11014'
+        reprt_codes = ['11014', '11013', '11012', '11011']
     else:
-        year, rep = now.year, f'1101{q}'
-    params = {
-        'crtfc_key': DART_KEY,
-        'corp_code': corp_code,
-        'bsns_year': year,
-        'reprt_code': rep
-    }
-    resp = requests.get(f"{DART_URL}/fnlttSinglAcnt.json", params=params, timeout=10)
-    data = resp.json().get('list', [])
-    for item in data:
-        if '주당순이익' in item.get('account_nm',''):
-            try:
-                return float(item.get('thstrm_amount','0').replace(',',''))
-            except:
-                return None
+        # 이번 분기 제외하고 전 분기들
+        cur = f"1101{q}"
+        others = [f"1101{n}" for n in [1,2,3,4] if f"1101{n}" != cur]
+        reprt_codes = others
+    for rep in reprt_codes:
+        params = {
+            'crtfc_key': DART_KEY,
+            'corp_code': corp_code,
+            'bsns_year': now.year if rep != '11014' else now.year - 1,
+            'reprt_code': rep
+        }
+        resp = requests.get(f"{DART_URL}/fnlttSinglAcnt.json", params=params, timeout=10)
+        if resp.status_code != 200:
+            logging.warning(f"DART EPS 조회 실패 코드 {resp.status_code} rep={rep}")
+            continue
+        data = resp.json().get('list', [])
+        for item in data:
+            if '주당순이익' in item.get('account_nm', ''):
+                try:
+                    return float(item.get('thstrm_amount','0').replace(',',''))
+                except Exception as e:
+                    logging.warning(f"EPS 파싱 오류 rep={rep}: {e}")
+                    return None
+    logging.info(f"{corp_code}: EPS 데이터 없음 (all reprt codes tried)")
     return None
 
-# ───── 지표 계산 헬퍼 ───── #
+# ───── 지표 계산 헬퍼 ───── # ───── #
 def latest(s: pd.Series, n: int = 1) -> Optional[float]:
     val = s.iloc[-n] if len(s) >= n else None
     return None if pd.isna(val) else float(val)

@@ -128,9 +128,9 @@ def detect_cross(df: pd.DataFrame) -> Optional[str]:
 
 def fetch_daily(code: str, days: int = 120) -> Optional[pd.DataFrame]:
     end,start = dt.datetime.now(), dt.datetime.now()-dt.timedelta(days=days)
-    sym = code.split('.')[0]
+    # 원본 코드(시장 접미사 포함)로 조회
     try:
-        df = fdr.DataReader(sym, start, end)
+        df = fdr.DataReader(code, start, end)
         df = df.reset_index(); df.rename(columns={'Date':'Date','Open':'Open','High':'High','Low':'Low','Close':'Close','Volume':'Volume'}, inplace=True)
         return df[['Date','Open','High','Low','Close','Volume']]
     except:

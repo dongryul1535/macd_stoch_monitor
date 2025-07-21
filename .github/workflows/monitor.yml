@@ -29,8 +29,9 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          DART_API_KEY:       ${{ secrets.DART_API_KEY }}
           STOCK_LIST:        ${{ secrets.STOCK_LIST }}
           SCALE_MACD:        ${{ secrets.SCALE_MACD }}
           SAVE_CSV:          ${{ secrets.SAVE_CSV }}
-          FONT_PATH: fonts/NanumGothic.ttf}
+          FONT_PATH:         'fonts/NanumGothic.ttf'
         run: python main.py

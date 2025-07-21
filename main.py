@@ -27,7 +27,7 @@ requests>=2.28.2
 finance-datareader>=0.9.59
 ta>=0.10.2
 matplotlib>=3.8.4
-opendartreader>=0.2.6
+OpenD
 ```"""
 
 import os

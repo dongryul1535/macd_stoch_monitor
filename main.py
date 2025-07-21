@@ -115,18 +115,28 @@ def detect_cross(df: pd.DataFrame) -> Optional[str]:
 # ───── 데이터 조회 ───── #
 
 def fetch_daily(code: str, days: int = 120) -> Optional[pd.DataFrame]:
-    end = dt.datetime.now(); start = end - dt.timedelta(days=days)
+    """FinanceDataReader로 한국 주식 과거 데이터 조회, 'Date' 포함 반환"""
+    end = dt.datetime.now()
+    start = end - dt.timedelta(days=days)
+    # 종목코드에서 시장 접미사 제거 (e.g., '005930.KS' → '005930')
+    symbol = code.split('.')[0]
     try:
-        df = fdr.DataReader(code, start, end)
-        if df.empty: return None
+        df = fdr.DataReader(symbol, start, end)
+        if df.empty:
+            logging.warning(f"{code}: 데이터 없음")
+            return None
         df = df.reset_index()
-        df.rename(columns={'Date':'Date','Open':'Open','High':'High','Low':'Low','Close':'Close','Volume':'Volume'}, inplace=True)
+        # DataFrame 컬럼 이름 통일
+        df.rename(columns={
+            'Date':'Date', 'Open':'Open', 'High':'High',
+            'Low':'Low', 'Close':'Close', 'Volume':'Volume'
+        }, inplace=True)
         return df[['Date','Open','High','Low','Close','Volume']]
     except Exception as e:
         logging.warning(f"{code}: 데이터 조회 실패 - {e}")
         return None
 
-# ───── 차트 생성 ───── #
+# ───── 차트 생성 ───── # ───── #
 
 def make_chart(df: pd.DataFrame, code: str) -> str:
     fig, (ax1, ax2) = plt.subplots(2,1, figsize=(8,6), sharex=True, gridspec_kw={'height_ratios':[3,1]})

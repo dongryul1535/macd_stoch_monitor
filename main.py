@@ -4,7 +4,7 @@ Korean Stock Monitor – Golden / Dead Cross on Composite Lines + 전분기
 ────────────────────────────────────────────────────────────────────
 📌 **매수·매도 규칙**
 - **Composite K** = MACD(12,26) + Slow %K(14,3)
-- **Composite D** = MACD(12,26) + Slow %D(14,3)
+- **Composite D** = MACD Signal(9) + Slow %D(14,3)
 - **Golden Cross** (Composite K ↑ Composite D) → **BUY**
 - **Dead Cross**   (Composite K ↓ Composite D) → **SELL**
 
@@ -34,6 +34,8 @@ import sys
 import logging
 import datetime as dt
 from typing import List, Optional
+import io
+import zipfile
 import xml.etree.ElementTree as ET
 
 import pandas as pd
@@ -78,12 +80,16 @@ CORP_CODE_URL = f"{DART_URL}/corpCode.xml"
 def load_corp_map() -> dict:
     params = {'crtfc_key': DART_KEY}
     resp = requests.get(CORP_CODE_URL, params=params, timeout=10)
-    root = ET.fromstring(resp.content)
+    # DART returns a zip file containing corpCode.xml
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    xml_name = zf.namelist()[0]
+    xml_bytes = zf.read(xml_name)
+    root = ET.fromstring(xml_bytes)
     corp_map = {}
     for corp in root.findall('list'):
         stock = corp.findtext('stock_code')
         code  = corp.findtext('corp_code')
-        if stock:
+        if stock and code:
             corp_map[stock.zfill(6)] = code
     return corp_map
 CORP_MAP = load_corp_map()
@@ -93,7 +99,6 @@ krx = fdr.StockListing('KRX')[['Code','Name']]
 kosdaq = fdr.StockListing('KOSDAQ')[['Code','Name']]
 name_map = {f"{r.Code}.KS": r.Name for _,r in krx.iterrows()}
 name_map.update({f"{r.Code}.KQ": r.Name for _,r in kosdaq.iterrows()})
-
 def get_name(code: str) -> str:
     return name_map.get(code, code)
 
@@ -114,9 +119,9 @@ def get_last_quarter_eps(corp_code: str) -> Optional[float]:
     resp = requests.get(f"{DART_URL}/fnlttSinglAcnt.json", params=params, timeout=10)
     data = resp.json().get('list', [])
     for item in data:
-        if '주당순이익' in item.get('account_nm', ''):
+        if '주당순이익' in item.get('account_nm',''):
             try:
-                return float(item.get('thstrm_amount', '0').replace(',', ''))
+                return float(item.get('thstrm_amount','0').replace(',',''))
             except:
                 return None
     return None
@@ -127,22 +132,32 @@ def latest(s: pd.Series, n: int = 1) -> Optional[float]:
     return None if pd.isna(val) else float(val)
 
 def add_composites(df: pd.DataFrame) -> pd.DataFrame:
-    macd = MACD(df['Close'], 26, 12, 9)
-    st   = StochasticOscillator(df['Close'], df['High'], df['Low'], 14, 3)
-    df['MACD'] = macd.macd(); df['MACD_SIG'] = macd.macd_signal()
-    df['SlowK'] = st.stoch(); df['SlowD'] = st.stoch_signal()
-    mv = df['MACD']
+    macd = MACD(df['Close'], window_slow=26, window_fast=12, window_sign=9)
+    st   = StochasticOscillator(df['Close'], df['High'], df['Low'], window=14, smooth_window=3)
+    df['MACD']     = macd.macd()
+    df['MACD_SIG'] = macd.macd_signal()
+    df['SlowK']    = st.stoch()
+    df['SlowD']    = st.stoch_signal()
+    # 스케일 조정
+    macd_vals = df['MACD']
+    macd_sig_vals = df['MACD_SIG']
     if SCALE_MACD:
-        mv = (mv - mv.min())/(mv.max()-mv.min())*100
-    df['CompK'] = mv + df['SlowK']; df['CompD'] = mv + df['SlowD']; df['Diff'] = df['CompK'] - df['CompD']
+        min_m, max_m = macd_vals.min(), macd_vals.max()
+        macd_vals     = (macd_vals - min_m) / (max_m - min_m) * 100
+        min_s, max_s = macd_sig_vals.min(), macd_sig_vals.max()
+        macd_sig_vals = (macd_sig_vals - min_s) / (max_s - min_s) * 100
+    # Composite 계산
+    df['CompK'] = macd_vals + df['SlowK']
+    df['CompD'] = macd_sig_vals + df['SlowD']
+    df['Diff']  = df['CompK'] - df['CompD']
     return df
 
 # ───── 교차 판정 ───── #
 def detect_cross(df: pd.DataFrame) -> Optional[str]:
     if len(df) < 2: return None
-    p, c = df['Diff'].iloc[-2], df['Diff'].iloc[-1]
-    if p <= 0 < c: return 'BUY'
-    if p >= 0 > c: return 'SELL'
+    prev, curr = df['Diff'].iloc[-2], df['Diff'].iloc[-1]
+    if prev <= 0 < curr: return 'BUY'
+    if prev >= 0 > curr: return 'SELL'
     return None
 
 # ───── 데이터 조회 ───── #
@@ -154,7 +169,8 @@ def fetch_daily(code: str, days: int = 120) -> Optional[pd.DataFrame]:
         if df.empty:
             logging.warning(f"{code}: 데이터 없음")
             return None
-        df = df.reset_index(); df.rename(columns=str.capitalize, inplace=True)
+        df = df.reset_index()
+        df.rename(columns=str.capitalize, inplace=True)
         return df[['Date','Open','High','Low','Close','Volume']]
     except Exception as e:
         logging.warning(f"{code}: 데이터 조회 실패 - {e}")
@@ -162,45 +178,60 @@ def fetch_daily(code: str, days: int = 120) -> Optional[pd.DataFrame]:
 
 # ───── 차트 생성 ───── #
 def make_chart(df: pd.DataFrame, code: str) -> str:
-    fig,(ax1,ax2)=plt.subplots(2,1,figsize=(8,6),sharex=True,gridspec_kw={'height_ratios':[3,1]})
-    name=get_name(code)
-    ax1.plot(df['Date'],df['Close'],label='종가'); ax1.plot(df['Date'],df['Close'].rolling(20).mean(),linestyle='--',label='MA20')
-    ax1.set_title(f"{code} ({name})",fontproperties=font_prop); ax1.legend(prop=font_prop)
-    ax2.plot(df['Date'],df['CompK'],label='CompK'); ax2.plot(df['Date'],df['CompD'],label='CompD')
-    ax2.axhline(0,color='gray',linewidth=0.5); ax2.set_title('Composite Cross',fontproperties=font_prop); ax2.legend(prop=font_prop)
-    ax2.xaxis.set_major_formatter(DateFormatter('%Y-%m-%d')); fig.autofmt_xdate(); fig.tight_layout()
-    path=f"{code}_chart.png"; fig.savefig(path,dpi=100); plt.close(fig); return path
+    fig, (ax1, ax2) = plt.subplots(2,1, figsize=(8,6), sharex=True, gridspec_kw={'height_ratios':[3,1]})
+    name = get_name(code)
+    ax1.plot(df['Date'], df['Close'], label='종가')
+    ax1.plot(df['Date'], df['Close'].rolling(20).mean(), linestyle='--', label='MA20')
+    ax1.set_title(f"{code} ({name})", fontproperties=font_prop)
+    ax1.legend(prop=font_prop)
+    ax2.plot(df['Date'], df['CompK'], label='CompK')
+    ax2.plot(df['Date'], df['CompD'], label='CompD')
+    ax2.axhline(0, color='gray', linewidth=0.5)
+    ax2.set_title('Composite Cross', fontproperties=font_prop)
+    ax2.legend(prop=font_prop)
+    ax2.xaxis.set_major_formatter(DateFormatter('%Y-%m-%d'))
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    path = f"{code}_chart.png"
+    fig.savefig(path, dpi=100)
+    plt.close(fig)
+    return path
 
 # ───── Telegram 전송 ───── #
-def tg_text(msg:str):
-    url=f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    for chunk in [msg[i:i+3000]for i in range(0,len(msg),3000)]:
-        requests.post(url,json={'chat_id':CHAT_ID,'text':chunk})
+def tg_text(msg: str):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    for chunk in [msg[i:i+3000] for i in range(0, len(msg), 3000)]:
+        requests.post(url, json={'chat_id': CHAT_ID, 'text': chunk})
 
-def tg_photo(path:str,caption:str=''):
-    url=f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
-    with open(path,'rb')as f:
-        requests.post(url,data={'chat_id':CHAT_ID,'caption':caption},files={'photo':f})
+def tg_photo(path: str, caption: str=''):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+    with open(path, 'rb') as f:
+        requests.post(url, data={'chat_id': CHAT_ID, 'caption': caption}, files={'photo': f})
 
 # ───── 메인 ───── #
 def main():
-    alerts:List[str]=[]
+    alerts: List[str] = []
     for code in STOCKS:
-        df=fetch_daily(code)
-        if df is None or len(df)<40: continue
-        df=add_composites(df)
-        sig=detect_cross(df)
-        sym=code.split('.')[0]
-        corp=CORP_MAP.get(sym)
-        eps= get_last_quarter_eps(corp) if corp else None
-        price=latest(df['Close'])
-        per= price/eps if eps else None
-        name=get_name(code)
-        cap=f"{code} ({name}) | EPS: {eps:.2f} | PER: {per:.2f}" if eps else f"{code} ({name}) | EPS: NA"
+        df = fetch_daily(code)
+        if df is None or len(df) < 40:
+            continue
+        df = add_composites(df)
+        sig = detect_cross(df)
+        sym = code.split('.')[0]
+        corp = CORP_MAP.get(sym)
+        eps = get_last_quarter_eps(corp) if corp else None
+        price = latest(df['Close'])
+        per = price/eps if eps else None
+        name = get_name(code)
+        cap = f"{code} ({name}) | EPS: {eps:.2f} | PER: {per:.2f}" if eps else f"{code} ({name}) | EPS: NA"
         if sig:
-            cap=f"{sig} Signal - {cap}"; alerts.append(cap)
-        img=make_chart(df.tail(120),code); tg_photo(img,caption=cap)
-        if SAVE_CSV: df.to_csv(f"{code}_hist.csv",index=False)
+            cap = f"{sig} Signal - {cap}"
+            alerts.append(cap)
+        img = make_chart(df.tail(120), code)
+        tg_photo(img, caption=cap)
+        if SAVE_CSV:
+            df.to_csv(f"{code}_hist.csv", index=False)
     tg_text("\n".join(alerts) if alerts else '신호 없음')
 
-if __name__=='__main__': main()
+if __name__ == '__main__':
+    main()

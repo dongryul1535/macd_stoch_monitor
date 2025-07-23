@@ -31,9 +31,22 @@ SAVE_CSV = os.getenv("SAVE_CSV", "false").lower() == "true"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# 한글 폰트 (서버 환경에 맞게 조정)
-font_path = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
-font_prop = font_manager.FontProperties(fname=font_path) if os.path.exists(font_path) else None
+# ──────────────────────────── 폰트 설정 ────────────────────────────
+FONT_PATH = os.getenv("FONT_PATH", "fonts/NanumGothic.ttf")
+
+def setup_korean_font(path: str):
+    from matplotlib import font_manager
+    import matplotlib.pyplot as plt
+    if os.path.exists(path):
+        font_manager.fontManager.addfont(path)
+        fp = font_manager.FontProperties(fname=path)
+        plt.rcParams['font.family'] = fp.get_name()
+        plt.rcParams['axes.unicode_minus'] = False
+        return fp
+    logging.warning("FONT_PATH not found: %s", path)
+    return None
+
+font_prop = setup_korean_font(FONT_PATH)
 
 # ────────────────────────────── 지표 계산 ───────────────────────────
 
@@ -245,9 +258,9 @@ def main() -> None:
 
     # 전체 요약 전송
     if alerts:
-        summary_lines = [f"📈 오늘 신호 종목 ({len(alerts)}개)\\n"]
+        summary_lines = [f"📈 오늘 신호 종목 ({len(alerts)}개)\n"]
         summary_lines += [f"- {c} ({n}): {s}" for c, n, s in alerts]
-        send_telegram("\\n".join(summary_lines))
+        send_telegram("\n".join(summary_lines))
     else:
         send_telegram("오늘 신호 없음")
 

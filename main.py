@@ -189,3 +189,22 @@ def main() -> None:
         logging.info("%s: 데이터 수집", code)
         df = fetch_price_data(code, start_date)
         if df.empty:
+            logging.warning("%s: 가격 데이터를 가져오지 못했습니다.", code)
+            continue
+
+        df = add_composites(df)
+        signal = detect_cross(df)
+        chart_path = make_chart(df, code)
+
+        if signal:
+            msg = f"{code} ➜ {signal}"
+            send_telegram(msg, chart_path)
+        else:
+            logging.info("%s: 신호 없음", code)
+
+        if SAVE_CSV:
+            df.to_csv(f"{code}_data.csv", index=False)
+
+
+if __name__ == "__main__":
+    main()

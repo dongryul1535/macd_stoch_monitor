@@ -245,11 +245,9 @@ def main() -> None:
 
     # 전체 요약 전송
     if alerts:
-        summary_lines = [f"📈 오늘 신호 종목 ({len(alerts)}개)
-"]
+        summary_lines = [f"📈 오늘 신호 종목 ({len(alerts)}개)\\n"]
         summary_lines += [f"- {c} ({n}): {s}" for c, n, s in alerts]
-        send_telegram("
-".join(summary_lines))
+        send_telegram("\\n".join(summary_lines))
     else:
         send_telegram("오늘 신호 없음")
 

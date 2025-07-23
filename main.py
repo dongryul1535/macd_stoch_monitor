@@ -29,8 +29,15 @@ SAVE_CSV      = os.getenv("SAVE_CSV", "false").lower() == "true"
 FONT_PATH     = os.getenv("FONT_PATH", "fonts/NanumGothic.ttf")
 
 USE_CONS      = os.getenv("USE_CONSENSUS", "false").lower() == "true"
-CONS_DAYS     = int(os.getenv("CONS_DAYS", "14"))
-CONS_PAGES    = int(os.getenv("CONS_PAGES", "50"))
+
+def _to_int(v, default):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+CONS_DAYS     = _to_int(os.getenv("CONS_DAYS"), 14)
+CONS_PAGES    = _to_int(os.getenv("CONS_PAGES"), 50)
 
 STOCKS_ENV    = [s.strip() for s in os.getenv("STOCK_LIST", "005930").split(",") if s.strip()]
 

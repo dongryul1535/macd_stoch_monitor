@@ -11,14 +11,20 @@ on:
 jobs:
   run-monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: stock-monitor
+      cancel-in-progress: false
+
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Set up Python 3.9
-        uses: actions/setup-python@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -27,11 +33,28 @@ jobs:
 
       - name: Run Stock monitor
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
-          DART_API_KEY:       ${{ secrets.DART_API_KEY }}
-          STOCK_LIST:        ${{ secrets.STOCK_LIST }}
-          SCALE_MACD:        ${{ secrets.SCALE_MACD }}
-          SAVE_CSV:          ${{ secrets.SAVE_CSV }}
-          FONT_PATH:         'fonts/NanumGothic.ttf'
-        run: python main.py
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          DART_API_KEY:        ${{ secrets.DART_API_KEY }}
+          STOCK_LIST:          ${{ secrets.STOCK_LIST }}
+          SAVE_CSV:            ${{ secrets.SAVE_CSV }}
+          FONT_PATH:           'fonts/NanumGothic.ttf'
+          USE_CONSENSUS:       ${{ secrets.USE_CONSENSUS }}   # "true"/"false"
+          CONS_DAYS:           ${{ secrets.CONS_DAYS }}       # 예: "14"
+          CONS_PAGES:          ${{ secrets.CONS_PAGES }}      # 예: "50"
+        run: |
+          python - <<'PY'
+          import sys, os
+          # hk_consensus_up.py 가 repo 루트라면 보장
+          sys.path.append(os.getcwd())
+          import main  # main.py 파일명이 main.py 인지 확인
+          PY
+          # 또는 그냥
+          python main.py
+
+      - name: Upload charts (optional)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: charts
+          path: "*.png"

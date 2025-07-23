@@ -42,15 +42,7 @@ jobs:
           USE_CONSENSUS:       ${{ secrets.USE_CONSENSUS }}   # "true"/"false"
           CONS_DAYS:           ${{ secrets.CONS_DAYS }}       # 예: "14"
           CONS_PAGES:          ${{ secrets.CONS_PAGES }}      # 예: "50"
-        run: |
-          python - <<'PY'
-          import sys, os
-          # hk_consensus_up.py 가 repo 루트라면 보장
-          sys.path.append(os.getcwd())
-          import main  # main.py 파일명이 main.py 인지 확인
-          PY
-          # 또는 그냥
-          python main.py
+        run: python main.py
 
       - name: Upload charts (optional)
         if: always()

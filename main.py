@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 """
-Stock Monitor – Golden / Dead Cross with NH MTS‑style MACD+Stochastic
+Stock Monitor – NH MTS-style MACD+Stochastic + Hankyung Consensus
 ────────────────────────────────────────────────────────────────────
-* Composite K  = ( StochNormalize(MACD_raw) + Slow %K ) / 2
-* Composite D  = SMA(Composite K, 3)
-* Golden Cross = CompK ↑ CompD  → BUY
-* Dead   Cross = CompK ↓ CompD  → SELL
-
-각 종목에 대한 차트 이미지를 생성해 텔레그램으로 알림을 보냅니다.
+- 모든 종목 차트 전송
+- 신호 종목 요약 전송
+- (옵션) 한경 컨센서스 상향 종목 자동 수집, 현재가·목표가·리포트 제목 포함
 """
 
-import os
-import logging
-import datetime as dt
-from typing import Optional
+import os, logging, datetime as dt
+from typing import Optional, List, Tuple, Dict, Any
 
 import numpy as np
 import pandas as pd
@@ -23,76 +18,80 @@ from matplotlib.dates import DateFormatter
 from matplotlib import font_manager
 import FinanceDataReader as fdr
 
-# ──────────────────────────── 환경 설정 ────────────────────────────
-TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-STOCKS  = [s.strip() for s in os.getenv("STOCK_LIST", "005930").split(",") if s.strip()]
-SAVE_CSV = os.getenv("SAVE_CSV", "false").lower() == "true"
+# ─────────── ENV ───────────
+TOKEN         = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID       = os.getenv("TELEGRAM_CHAT_ID")
+SAVE_CSV      = os.getenv("SAVE_CSV", "false").lower() == "true"
+FONT_PATH     = os.getenv("FONT_PATH", "fonts/NanumGothic.ttf")
+
+USE_CONS      = os.getenv("USE_CONSENSUS", "false").lower() == "true"
+CONS_DAYS     = int(os.getenv("CONS_DAYS", "14"))
+CONS_PAGES    = int(os.getenv("CONS_PAGES", "50"))
+
+STOCKS_ENV    = [s.strip() for s in os.getenv("STOCK_LIST", "005930").split(",") if s.strip()]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# ──────────────────────────── 폰트 설정 ────────────────────────────
-FONT_PATH = os.getenv("FONT_PATH", "fonts/NanumGothic.ttf")
-
+# ─────────── Font ───────────
 def setup_korean_font(path: str):
-    from matplotlib import font_manager
-    import matplotlib.pyplot as plt
     if os.path.exists(path):
         font_manager.fontManager.addfont(path)
         fp = font_manager.FontProperties(fname=path)
-        plt.rcParams['font.family'] = fp.get_name()
-        plt.rcParams['axes.unicode_minus'] = False
+        plt.rcParams["font.family"] = fp.get_name()
+        plt.rcParams["axes.unicode_minus"] = False
         return fp
     logging.warning("FONT_PATH not found: %s", path)
     return None
 
 font_prop = setup_korean_font(FONT_PATH)
 
-# ────────────────────────────── 지표 계산 ───────────────────────────
+# ─────────── Consensus ───────────
+def load_consensus_df() -> pd.DataFrame:
+    """hk_consensus_up.get_upgraded() 결과 DataFrame 반환 (없으면 빈 DF)"""
+    if not USE_CONS:
+        return pd.DataFrame()
+    try:
+        from hk_consensus_up import get_upgraded
+    except Exception as e:
+        logging.error("hk_consensus_up import 실패: %s", e)
+        return pd.DataFrame()
+    try:
+        df = get_upgraded(days=CONS_DAYS, max_pages=CONS_PAGES)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        if "종목코드" not in df.columns:
+            return pd.DataFrame()
+        df["종목코드"] = df["종목코드"].astype(str).str.zfill(6)
+        return df
+    except Exception as e:
+        logging.error("get_upgraded 실행 실패: %s", e)
+        return pd.DataFrame()
 
-def add_composites(
-    df: pd.DataFrame,
-    fast: int = 12,
-    slow: int = 26,
-    k_window: int = 14,
-    k_smooth: int = 3,
-    d_smooth: int = 3,
-    use_ema: bool = True,
-    clip: bool = True,
-) -> pd.DataFrame:
-    """NH 나무 MTS ‘MACD+Stochastic’ 유사 Composite K/D 추가"""
+# ─────────── Indicator ───────────
+def add_composites(df: pd.DataFrame,
+                   fast=12, slow=26, k_window=14, k_smooth=3,
+                   d_smooth=3, use_ema=True, clip=True) -> pd.DataFrame:
+    close, high, low = df["Close"], df["High"], df["Low"]
 
-    close, high, low = df['Close'], df['High'], df['Low']
-
-    # 1) MACD 원시값
     ema_fast = close.ewm(span=fast, adjust=False).mean()
     ema_slow = close.ewm(span=slow, adjust=False).mean()
     macd_raw = ema_fast - ema_slow
 
-    # 2) MACD → 0~100 스토캐스틱화
     macd_min = macd_raw.rolling(k_window, min_periods=1).min()
     macd_max = macd_raw.rolling(k_window, min_periods=1).max()
     macd_norm = (macd_raw - macd_min) / (macd_max - macd_min).replace(0, np.nan) * 100
     macd_norm = macd_norm.fillna(50)
-
     if k_smooth > 1:
-        macd_norm = (
-            macd_norm.ewm(span=k_smooth, adjust=False).mean() if use_ema else
-            macd_norm.rolling(k_smooth, min_periods=1).mean()
-        )
+        macd_norm = macd_norm.ewm(span=k_smooth, adjust=False).mean() if use_ema \
+            else macd_norm.rolling(k_smooth, min_periods=1).mean()
 
-    # 3) 가격 기반 Slow %K
     ll = low.rolling(k_window, min_periods=1).min()
     hh = high.rolling(k_window, min_periods=1).max()
     k_raw = (close - ll) / (hh - ll).replace(0, np.nan) * 100
     k_raw = k_raw.fillna(50)
+    slow_k = (k_raw.ewm(span=k_smooth, adjust=False).mean() if (k_smooth > 1 and use_ema)
+              else k_raw.rolling(k_smooth, min_periods=1).mean() if k_smooth > 1 else k_raw)
 
-    slow_k = (
-        k_raw.ewm(span=k_smooth, adjust=False).mean() if (k_smooth > 1 and use_ema) else
-        k_raw.rolling(k_smooth, min_periods=1).mean() if k_smooth > 1 else k_raw
-    )
-
-    # 4) Composite K / D
     comp_k = (macd_norm + slow_k) / 2.0
     comp_d = comp_k.rolling(d_smooth, min_periods=1).mean() if d_smooth > 1 else comp_k
 
@@ -100,49 +99,78 @@ def add_composites(
         comp_k = comp_k.clip(0, 100)
         comp_d = comp_d.clip(0, 100)
 
-    df['CompK'] = comp_k
-    df['CompD'] = comp_d
-    df['Diff']  = comp_k - comp_d
+    df["CompK"], df["CompD"], df["Diff"] = comp_k, comp_d, comp_k - comp_d
     return df
 
-
-# ──────────────────────────── 신호 판정 ────────────────────────────
-
-def detect_cross(df: pd.DataFrame, ob: int = 80, os: int = 20) -> Optional[str]:
-    if len(df) < 2:
-        return None
-    prev_diff, curr_diff = df['Diff'].iloc[-2], df['Diff'].iloc[-1]
-    prev_k = df['CompK'].iloc[-2]
-
-    # 골든 / 데드 크로스 + 과매수·과매도 필터
+def detect_cross(df: pd.DataFrame, ob=80, os=20) -> Optional[str]:
+    if len(df) < 2: return None
+    prev_diff, curr_diff = df["Diff"].iloc[-2], df["Diff"].iloc[-1]
+    prev_k = df["CompK"].iloc[-2]
     if prev_diff <= 0 < curr_diff:
-        return 'BUY' if prev_k < os else 'BUY_W'
+        return "BUY" if prev_k < os else "BUY_W"
     if prev_diff >= 0 > curr_diff:
-        return 'SELL' if prev_k > ob else 'SELL_W'
+        return "SELL" if prev_k > ob else "SELL_W"
     return None
 
+# ─────────── Data utils ───────────
+_name_map: Dict[str,str] = {}
 
-# ──────────────────────────── 차트 그리기 ───────────────────────────
+def normalize_code(code: str) -> str:
+    return code.split(".")[0]
 
+def get_korean_name(code: str) -> str:
+    global _name_map
+    if not _name_map:
+        try:
+            lst = fdr.StockListing("KRX")
+            _name_map = lst.set_index("Code")["Name"].to_dict()
+        except Exception:
+            _name_map = {}
+    return _name_map.get(normalize_code(code), code)
+
+try:
+    import yfinance as yf
+except Exception:
+    yf = None
+
+def fetch_price_data(code: str, start: str) -> pd.DataFrame:
+    norm = normalize_code(code)
+    try:
+        df = fdr.DataReader(norm, start)
+        if df is not None and not df.empty:
+            return df.reset_index()[["Date","Open","High","Low","Close","Volume"]]
+    except Exception:
+        pass
+    if yf is not None:
+        try:
+            ydf = yf.download(code if "." in code else f"{code}.KS", start=start, progress=False)
+            if not ydf.empty:
+                ydf = ydf.rename(columns=str.title).reset_index()
+                return ydf[["Date","Open","High","Low","Close","Volume"]]
+        except Exception:
+            pass
+    return pd.DataFrame()
+
+# ─────────── Chart ───────────
 def make_chart(df: pd.DataFrame, code: str) -> str:
     name = get_korean_name(code)
     title = f"{normalize_code(code)} ({name})"
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), sharex=True,
-                                   gridspec_kw={'height_ratios': [3, 1]})
+                                   gridspec_kw={"height_ratios":[3,1]})
 
-    ax1.plot(df['Date'], df['Close'], label='Close')
-    ax1.plot(df['Date'], df['Close'].rolling(20).mean(), '--', label='MA20')
+    ax1.plot(df["Date"], df["Close"], label="Close")
+    ax1.plot(df["Date"], df["Close"].rolling(20).mean(), "--", label="MA20")
     ax1.set_title(title, fontproperties=font_prop)
     ax1.legend(prop=font_prop)
 
-    ax2.plot(df['Date'], df['CompK'], color='red', label='MACD+Slow%K')
-    ax2.plot(df['Date'], df['CompD'], color='purple', label='MACD+Slow%D')
-    ax2.axhline(20, color='gray', linestyle='--', linewidth=0.5)
-    ax2.axhline(80, color='gray', linestyle='--', linewidth=0.5)
+    ax2.plot(df["Date"], df["CompK"], color="red", label="MACD+Slow%K")
+    ax2.plot(df["Date"], df["CompD"], color="purple", label="MACD+Slow%D")
+    ax2.axhline(20, color="gray", linestyle="--", linewidth=0.5)
+    ax2.axhline(80, color="gray", linestyle="--", linewidth=0.5)
     ax2.set_ylim(0, 100)
-    ax2.set_title('MACD+Stochastic (NH Style)', fontproperties=font_prop)
-    ax2.legend(prop=font_prop, loc='upper left')
-    ax2.xaxis.set_major_formatter(DateFormatter('%Y-%m-%d'))
+    ax2.set_title("MACD+Stochastic (NH Style)", fontproperties=font_prop)
+    ax2.legend(prop=font_prop, loc="upper left")
+    ax2.xaxis.set_major_formatter(DateFormatter("%Y-%m-%d"))
 
     fig.autofmt_xdate()
     fig.tight_layout()
@@ -152,13 +180,10 @@ def make_chart(df: pd.DataFrame, code: str) -> str:
     plt.close(fig)
     return path
 
-
-# ───────────────────────────── 텔레그램 ────────────────────────────
-
+# ─────────── Telegram ───────────
 def send_telegram(message: str, photo_path: Optional[str] = None) -> None:
-    """문자·이미지 전송 (사진 있으면 sendPhoto, 없으면 sendMessage)"""
     if not TOKEN or not CHAT_ID:
-        logging.error("Telegram TOKEN / CHAT_ID 환경변수가 설정되지 않았습니다.")
+        logging.error("Telegram TOKEN / CHAT_ID 미설정")
         return
     try:
         if photo_path and os.path.exists(photo_path):
@@ -166,74 +191,39 @@ def send_telegram(message: str, photo_path: Optional[str] = None) -> None:
                 requests.post(
                     f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
                     data={"chat_id": CHAT_ID, "caption": message},
-                    files={"photo": f},
-                    timeout=10,
-                )
+                    files={"photo": f}, timeout=10)
         else:
             requests.post(
                 f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                 data={"chat_id": CHAT_ID, "text": message},
-                timeout=10,
-            )
+                timeout=10)
         logging.info("Telegram 전송 완료: %s", message)
     except Exception as e:
         logging.exception("Telegram 전송 실패: %s", e)
 
-
-# ──────────────────────────── 데이터 수집 ───────────────────────────
-
-_name_map = None  # 캐시용
-
-def normalize_code(code: str) -> str:
-    """'000660.KS' -> '000660' 처럼 접미사를 제거"""
-    return code.split('.')[0]
-
-def get_korean_name(code: str) -> str:
-    """FinanceDataReader 상장목록에서 한글 종목명 조회 (실패 시 코드 반환)"""
-    global _name_map
-    if _name_map is None:
-        try:
-            lst = fdr.StockListing('KRX')  # Code, Name 등
-            _name_map = lst.set_index('Code')['Name'].to_dict()
-        except Exception:
-            _name_map = {}
-    return _name_map.get(normalize_code(code), code)
-
-# yfinance는 선택적 사용
-try:
-    import yfinance as yf
-except Exception:  # 설치 안 됐으면 무시
-    yf = None
-
-def fetch_price_data(code: str, start: str) -> pd.DataFrame:
-    """우선 FDR, 실패 시 yfinance로 백업 조회"""
-    norm = normalize_code(code)
-    # 1) FDR
-    try:
-        df = fdr.DataReader(norm, start)
-        if df is not None and not df.empty:
-            return df.reset_index()[['Date','Open','High','Low','Close','Volume']]
-    except Exception:
-        pass
-    # 2) yfinance fallback
-    if yf is not None:
-        try:
-            ydf = yf.download(code if '.' in code else f"{code}.KS", start=start, progress=False)
-            if not ydf.empty:
-                ydf = ydf.rename(columns=str.title).reset_index()
-                return ydf[['Date','Open','High','Low','Close','Volume']]
-        except Exception:
-            pass
-    return pd.DataFrame()
-
-
-# ───────────────────────────────── Main ────────────────────────────
-
+# ─────────── Main ───────────
 def main() -> None:
-    start_date = (dt.date.today() - dt.timedelta(days=365)).isoformat()
-    alerts = []  # [(code,name,signal)]
+    cons_df = load_consensus_df()
+    if not cons_df.empty:
+        stocks = cons_df["종목코드"].tolist()
+        logging.info("콘센서스 상향 종목 %d개 사용", len(stocks))
+    else:
+        stocks = STOCKS_ENV
 
-    for code in STOCKS:
+    # 빠른 조회용 메타 dict
+    cons_meta: Dict[str, Dict[str, Any]] = {}
+    if not cons_df.empty:
+        for _, r in cons_df.iterrows():
+            cons_meta[r["종목코드"]] = {
+                "현재가": r.get("현재가"),
+                "목표가": r.get("목표가"),
+                "제목":  r.get("리포트제목") or r.get("제목")
+            }
+
+    start_date = (dt.date.today() - dt.timedelta(days=365)).isoformat()
+    alerts: List[Tuple[str,str,str]] = []
+
+    for code in stocks:
         logging.info("%s: 데이터 수집", code)
         df = fetch_price_data(code, start_date)
         if df.empty:
@@ -245,9 +235,18 @@ def main() -> None:
         name = get_korean_name(code)
         chart_path = make_chart(df, code)
 
-        # 차트는 항상 전송
-        sig_txt = signal if signal else '신호 없음'
-        msg = f"{normalize_code(code)} ({name}) ➜ {sig_txt}"
+        meta = cons_meta.get(normalize_code(code), {})
+        cur_p = meta.get("현재가")
+        tgt_p = meta.get("목표가")
+        title = meta.get("제목")
+
+        parts = [f"{normalize_code(code)} ({name})",
+                 f"신호: {signal if signal else '없음'}"]
+        if cur_p is not None: parts.append(f"현재가 {cur_p}")
+        if tgt_p is not None: parts.append(f"목표가 {tgt_p}")
+        if title:             parts.append(f"리포트: {title}")
+        msg = " | ".join(parts)
+
         send_telegram(msg, chart_path)
 
         if signal:
@@ -256,11 +255,10 @@ def main() -> None:
         if SAVE_CSV:
             df.to_csv(f"{normalize_code(code)}_data.csv", index=False)
 
-    # 전체 요약 전송
     if alerts:
-        summary_lines = [f"📈 오늘 신호 종목 ({len(alerts)}개)\n"]
-        summary_lines += [f"- {c} ({n}): {s}" for c, n, s in alerts]
-        send_telegram("\n".join(summary_lines))
+        summary = ["📈 오늘 신호 종목 (%d개)\n" % len(alerts)]
+        summary += [f"- {c} ({n}): {s}" for c, n, s in alerts]
+        send_telegram("\n".join(summary))
     else:
         send_telegram("오늘 신호 없음")
 

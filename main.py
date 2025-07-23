@@ -26,7 +26,7 @@ import FinanceDataReader as fdr
 # ──────────────────────────── 환경 설정 ────────────────────────────
 TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-STOCKS  = [s.strip() for s in os.getenv("STOCK_LIST", "005930.KS").split(",") if s.strip()]
+STOCKS  = [s.strip() for s in os.getenv("STOCK_LIST", "005930").split(",") if s.strip()]
 SAVE_CSV = os.getenv("SAVE_CSV", "false").lower() == "true"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -112,29 +112,29 @@ def detect_cross(df: pd.DataFrame, ob: int = 80, os: int = 20) -> Optional[str]:
 # ──────────────────────────── 차트 그리기 ───────────────────────────
 
 def make_chart(df: pd.DataFrame, code: str) -> str:
+    name = get_korean_name(code)
+    title = f"{normalize_code(code)} ({name})"
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), sharex=True,
                                    gridspec_kw={'height_ratios': [3, 1]})
 
-    # 가격
     ax1.plot(df['Date'], df['Close'], label='Close')
     ax1.plot(df['Date'], df['Close'].rolling(20).mean(), '--', label='MA20')
-    ax1.set_title(code, fontproperties=font_prop)
+    ax1.set_title(title, fontproperties=font_prop)
     ax1.legend(prop=font_prop)
 
-    # Composite K/D
     ax2.plot(df['Date'], df['CompK'], color='red', label='MACD+Slow%K')
     ax2.plot(df['Date'], df['CompD'], color='purple', label='MACD+Slow%D')
     ax2.axhline(20, color='gray', linestyle='--', linewidth=0.5)
     ax2.axhline(80, color='gray', linestyle='--', linewidth=0.5)
     ax2.set_ylim(0, 100)
-    ax2.set_title('MACD+Stochastic (NH Style)', fontproperties=font_prop)
+    ax2.set_title('MACD+Stochastic (NH Style)', fontproperties=font_prop)
     ax2.legend(prop=font_prop, loc='upper left')
     ax2.xaxis.set_major_formatter(DateFormatter('%Y-%m-%d'))
 
     fig.autofmt_xdate()
     fig.tight_layout()
 
-    path = f"{code}_chart.png"
+    path = f"{normalize_code(code)}_chart.png"
     fig.savefig(path, dpi=100)
     plt.close(fig)
     return path
@@ -169,21 +169,56 @@ def send_telegram(message: str, photo_path: Optional[str] = None) -> None:
 
 # ──────────────────────────── 데이터 수집 ───────────────────────────
 
-def fetch_price_data(code: str, start: str) -> pd.DataFrame:
-    """FinanceDataReader 사용 – 일봉 데이터 수집"""
-    df = fdr.DataReader(code, start)
-    if df is None or df.empty:
-        return pd.DataFrame()
+_name_map = None  # 캐시용
 
-    df = df.reset_index()
-    df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']]
-    return df
+def normalize_code(code: str) -> str:
+    """'000660.KS' -> '000660' 처럼 접미사를 제거"""
+    return code.split('.')[0]
+
+def get_korean_name(code: str) -> str:
+    """FinanceDataReader 상장목록에서 한글 종목명 조회 (실패 시 코드 반환)"""
+    global _name_map
+    if _name_map is None:
+        try:
+            lst = fdr.StockListing('KRX')  # Code, Name 등
+            _name_map = lst.set_index('Code')['Name'].to_dict()
+        except Exception:
+            _name_map = {}
+    return _name_map.get(normalize_code(code), code)
+
+# yfinance는 선택적 사용
+try:
+    import yfinance as yf
+except Exception:  # 설치 안 됐으면 무시
+    yf = None
+
+def fetch_price_data(code: str, start: str) -> pd.DataFrame:
+    """우선 FDR, 실패 시 yfinance로 백업 조회"""
+    norm = normalize_code(code)
+    # 1) FDR
+    try:
+        df = fdr.DataReader(norm, start)
+        if df is not None and not df.empty:
+            return df.reset_index()[['Date','Open','High','Low','Close','Volume']]
+    except Exception:
+        pass
+    # 2) yfinance fallback
+    if yf is not None:
+        try:
+            ydf = yf.download(code if '.' in code else f"{code}.KS", start=start, progress=False)
+            if not ydf.empty:
+                ydf = ydf.rename(columns=str.title).reset_index()
+                return ydf[['Date','Open','High','Low','Close','Volume']]
+        except Exception:
+            pass
+    return pd.DataFrame()
 
 
 # ───────────────────────────────── Main ────────────────────────────
 
 def main() -> None:
     start_date = (dt.date.today() - dt.timedelta(days=365)).isoformat()
+    alerts = []  # [(code,name,signal)]
 
     for code in STOCKS:
         logging.info("%s: 데이터 수집", code)
@@ -194,17 +229,30 @@ def main() -> None:
 
         df = add_composites(df)
         signal = detect_cross(df)
+        name = get_korean_name(code)
         chart_path = make_chart(df, code)
 
+        # 차트는 항상 전송
+        sig_txt = signal if signal else '신호 없음'
+        msg = f"{normalize_code(code)} ({name}) ➜ {sig_txt}"
+        send_telegram(msg, chart_path)
+
         if signal:
-            msg = f"{code} ➜ {signal}"
-            send_telegram(msg, chart_path)
-        else:
-            logging.info("%s: 신호 없음", code)
+            alerts.append((normalize_code(code), name, signal))
 
         if SAVE_CSV:
-            df.to_csv(f"{code}_data.csv", index=False)
+            df.to_csv(f"{normalize_code(code)}_data.csv", index=False)
 
+    # 전체 요약 전송
+    if alerts:
+        lines = [f"📈 오늘 신호 종목 ({len(alerts)}개)
+"]
+        for c,n,s in alerts:
+            lines.append(f"- {c} ({n}): {s}")
+        send_telegram("
+".join(lines))
+    else:
+        send_telegram("오늘 신호 없음")
 
 if __name__ == "__main__":
     main()
